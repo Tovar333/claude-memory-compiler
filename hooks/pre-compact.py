@@ -97,7 +97,7 @@ def main() -> None:
         try:
             hook_input: dict = json.loads(raw_input)
         except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw_input)
+            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
             hook_input = json.loads(fixed_input)
     except (json.JSONDecodeError, ValueError, EOFError) as e:
         logging.error("Failed to parse stdin: %s", e)
@@ -161,9 +161,26 @@ def main() -> None:
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
         )
-        logging.info("Spawned flush.py for session %s (%d turns, %d chars)", session_id, turn_count, len(context))
+        logging.info(
+            "Spawned flush.py for session %s (%d turns, %d chars)",
+            session_id,
+            turn_count,
+            len(context),
+        )
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
+
+    # Structured resume snapshot for the per-project auto-memory dir.
+    # Failure here must never block the existing flush.py path.
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from resume_snapshot import write_snapshot
+
+        snap_path = write_snapshot(hook_input)
+        if snap_path:
+            logging.info("Wrote resume snapshot to %s", snap_path)
+    except Exception as e:
+        logging.error("Resume snapshot failed: %s", e)
 
 
 if __name__ == "__main__":

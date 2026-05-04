@@ -69,7 +69,9 @@ knowledge/
 ├── log.md                # Append-only chronological build log
 ├── concepts/             # Atomic knowledge articles
 ├── connections/          # Cross-cutting insights linking 2+ concepts
-└── qa/                   # Filed query answers (compounding knowledge)
+├── qa/                   # Filed query answers (compounding knowledge)
+├── compounds/            # Full problem→solution receipts from CE work cycles
+└── debugging/            # Root-cause traces from /ce-debug sessions
 ```
 
 ### Layer 3: This File (AGENTS.md)
@@ -222,6 +224,141 @@ filed: 2026-04-05
 - What about edge case X?
 - How does this change if Y?
 ```
+
+### Compound Articles (`knowledge/compounds/`)
+
+Full problem→solution receipts. Created when a session shows a complete work cycle (problem framing → investigation → solution → prevention). These are the "I solved this exact thing once before" artifacts that make future similar problems cheap to fix.
+
+Triggered by: `/ce-compound` skill invocation, OR transcripts showing the heuristic pattern (problem statement + commits + tests + clear resolution).
+
+```markdown
+---
+title: "Fix: <problem one-liner>"
+type: compound
+phase: fix              # brainstorm | plan | fix | debug | pattern
+tags: [domain, subsystem, error-type]
+problem_one_line: "<one sentence problem statement>"
+solution_one_line: "<one sentence solution>"
+effort_hours: <number>
+created: 2026-04-27
+sessions:
+  - "daily/2026-04-27.md"
+---
+
+# Fix: <Problem Title>
+
+> [!warning] Problem
+> <Root cause description in 1-3 sentences>
+
+> [!success] Solution
+> 1. <Numbered step>
+> 2. <Numbered step>
+
+> [!tip] Why It Works
+> <Underlying mechanism in 1-2 sentences>
+
+## Investigation Path
+
+<What we tried, what failed, what worked — chronological. Include commands run, hypotheses tested, dead ends. This is the "show your work" section that makes the receipt useful next time.>
+
+## Exact Fix
+
+<file:line references with markdown links to the actual code changes>
+
+- [path/to/file.py:123-145](path/to/file.py#L123-L145) — <what changed and why>
+
+## Prevention
+
+<How to avoid this in the future. Could be a checklist item, a rule for code review, an assertion to add, a doc to update.>
+
+## Related
+
+- [[concepts/related-concept]]
+- [[debugging/related-trace]]
+- [[compounds/related-compound]]
+```
+
+### Debugging Articles (`knowledge/debugging/`)
+
+Root-cause traces from `/ce-debug` sessions. Where compound articles capture "we solved X this way," debugging articles capture the diagnostic *journey* — what symptoms looked like, what hypotheses we tested, how we narrowed it down. Useful when a similar bug returns with different surface symptoms.
+
+```markdown
+---
+title: "Debug: <symptom one-liner>"
+type: debug_trace
+phase: debug
+tags: [domain, error-type, debugging-technique]
+symptom_one_line: "<what the user/system was seeing>"
+root_cause_one_line: "<the actual underlying cause>"
+diagnosis_minutes: <number>
+created: 2026-04-27
+sessions:
+  - "daily/2026-04-27.md"
+---
+
+# Debug: <Symptom Title>
+
+> [!warning] Symptom
+> <What was visible — error message, behavior, log line>
+
+> [!info] Root Cause
+> <The actual underlying cause once identified>
+
+## Diagnostic Journey
+
+### Hypothesis 1: <theory>
+<What we tested. Outcome: ❌/✅>
+
+### Hypothesis 2: <theory>
+<What we tested. Outcome: ❌/✅>
+
+<Repeat for each hypothesis tried.>
+
+## Key Diagnostic Commands
+
+```bash
+<actual commands that helped narrow it down>
+```
+
+## Why The Initial Hypotheses Were Wrong
+
+<What misleading signals pointed away from the real cause. This is the highest-value section for future-you.>
+
+## Resolution
+
+<Pointer to the compound article that has the fix, OR inline fix if it was small.>
+- [[compounds/related-fix]]
+```
+
+### CE Phase Detection Rules (used by `flush.py`)
+
+When `flush.py` extracts knowledge from a session transcript, it first determines the CE phase to choose the right extraction prompt and target directory.
+
+| Marker in transcript | Phase | Target directory | Extraction prompt |
+|---|---|---|---|
+| `/ce-compound`, `ce_compound` | compound | `knowledge/compounds/` | COMPOUND_EXTRACTION_PROMPT |
+| `/ce-debug`, `ce_debug`, "WAT loop", "root cause:" | debug | `knowledge/debugging/` | DEBUG_EXTRACTION_PROMPT |
+| `/ce-work`, `ce_work` | work | `daily/` (generic flush) | GENERIC_FLUSH_PROMPT |
+| `/ce-plan`, `ce_plan` | plan | `daily/` | GENERIC_FLUSH_PROMPT |
+| `/ce-brainstorm`, `ce_brainstorm` | brainstorm | `daily/` | GENERIC_FLUSH_PROMPT |
+| **Heuristic**: transcript contains "commit" + "test" + "problem" | compound (implicit) | `knowledge/compounds/` | COMPOUND_EXTRACTION_PROMPT |
+| (none of the above) | generic | `daily/` | GENERIC_FLUSH_PROMPT (existing MC behavior) |
+
+The heuristic catches sessions where the user solved a real problem but didn't explicitly run `/ce-compound`. flush.py at session-end inspects the transcript text and routes accordingly.
+
+### Tag Conventions
+
+When creating concept/compound/debugging articles, use these tag domains. They mirror the project's CLAUDE.md skill triggers so search and graph clusters align:
+
+| Domain | Tag values | Source |
+|---|---|---|
+| Trading bot | `trading`, `regime`, `kelly`, `meta-label`, `f10`, `walk-forward`, `monte-carlo`, `dashboard`, `tlp`, `safety-gate` | matches `regime-analysis`, `dashboard-sync`, `audit/*`, `safety-gate/*` skills |
+| Infrastructure | `telegram`, `vpn`, `cloudflared`, `ngrok`, `windows-task-scheduler`, `winerror-10053` | session-handoff history |
+| Process | `housekeeping`, `git-worktrees`, `parallel-agents`, `tdd`, `monthly-review` | matches general skills |
+| Memory/KB | `memory-kb`, `compound`, `debug-trace`, `lesson`, `gotcha`, `insight` | self-referential |
+| Codebase health | `dead-code`, `untested`, `duplicate`, `orphan` | matches `codebase-map audit` |
+
+Articles can have multiple tags (e.g., `[trading, regime, telegram]` for a Telegram-rate-limit issue that fired during a trading session). Multi-tag articles cluster more richly in Obsidian's graph view.
 
 ---
 

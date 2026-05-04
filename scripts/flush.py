@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Recursion prevention: set this BEFORE any imports that might trigger Claude
 import os
+
 os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
 
 import asyncio
@@ -72,17 +73,32 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
         f.write(entry)
 
 
-async def run_flush(context: str) -> str:
-    """Use Claude Agent SDK to extract important knowledge from conversation context."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
+def detect_ce_phase(transcript_text: str) -> str:
+    """Detect CE workflow phase from transcript markers.
 
-    prompt = f"""Review the conversation context below and respond with a concise summary
+    Returns one of: 'compound', 'debug', 'work', 'plan', 'brainstorm', 'generic'.
+    Compound and debug phases route output to dedicated knowledge subdirs;
+    others fall through to the generic daily-log flow.
+    """
+    text = transcript_text.lower()
+    explicit_markers = {
+        "compound": ["/ce-compound", "ce_compound"],
+        "debug": ["/ce-debug", "ce_debug", "wat loop", "root cause:"],
+        "work": ["/ce-work", "ce_work"],
+        "plan": ["/ce-plan", "ce_plan"],
+        "brainstorm": ["/ce-brainstorm", "ce_brainstorm"],
+    }
+    for phase, needles in explicit_markers.items():
+        if any(n in text for n in needles):
+            return phase
+    # Heuristic: a session with commits + tests + clear problem framing is
+    # implicitly compound-worthy even without explicit /ce-compound.
+    if all(s in text for s in ("commit", "test", "problem")):
+        return "compound"
+    return "generic"
+
+
+GENERIC_FLUSH_PROMPT = """Review the conversation context below and respond with a concise summary
 of important items that should be preserved in the daily log.
 Do NOT use any tools — just return plain text.
 
@@ -109,10 +125,119 @@ Skip anything that is:
 
 Only include sections that have actual content. If nothing is worth saving,
 respond with exactly: FLUSH_OK
+"""
 
-## Conversation Context
 
-{context}"""
+COMPOUND_EXTRACTION_PROMPT = """Review the conversation context below. This session looks like a complete
+work cycle (problem framing → investigation → solution → prevention). Extract
+a structured compound-note draft that captures the problem→solution receipt.
+Do NOT use any tools — just return plain text.
+
+Tag this entry with `**Phase:** compound` so the compiler routes it to
+`knowledge/compounds/`. Format:
+
+**Phase:** compound
+
+**Problem (one-line):** <one sentence>
+
+**Solution (one-line):** <one sentence>
+
+**Tags:** [domain, subsystem, error-type — comma separated]
+
+**Effort hours:** <approximate>
+
+**Problem (detailed):**
+<2-4 sentence root-cause description>
+
+**Investigation Path:**
+- <chronological: what we tried, what failed, what worked>
+
+**Solution (detailed):**
+1. <numbered step>
+2. <numbered step>
+
+**Why It Works:**
+<1-2 sentences on the underlying mechanism>
+
+**Exact Fix:**
+- <file:line refs with what changed>
+
+**Prevention:**
+<how to avoid this in future — checklist item, code review rule, etc.>
+
+If the conversation doesn't actually contain a complete problem-solution cycle
+(e.g. just exploratory discussion without resolution), respond with exactly:
+FLUSH_OK
+"""
+
+
+DEBUG_EXTRACTION_PROMPT = """Review the conversation context below. This session looks like a debugging
+trace (symptoms → hypotheses → diagnostic commands → root cause). Extract a
+structured debug-trace draft that captures the diagnostic *journey* — useful
+when a similar bug returns with different surface symptoms.
+Do NOT use any tools — just return plain text.
+
+Tag this entry with `**Phase:** debug` so the compiler routes it to
+`knowledge/debugging/`. Format:
+
+**Phase:** debug
+
+**Symptom (one-line):** <what the user/system was seeing>
+
+**Root cause (one-line):** <the actual underlying cause once identified>
+
+**Tags:** [domain, error-type, debugging-technique — comma separated]
+
+**Diagnosis minutes:** <approximate>
+
+**Symptom (detailed):**
+<error message, behavior, log line — what was visible>
+
+**Diagnostic Journey:**
+- Hypothesis 1: <theory> → outcome (✅/❌)
+- Hypothesis 2: <theory> → outcome (✅/❌)
+- (continue for each hypothesis tested)
+
+**Key Diagnostic Commands:**
+```
+<actual commands that helped narrow it down>
+```
+
+**Why The Initial Hypotheses Were Wrong:**
+<misleading signals that pointed away from the real cause>
+
+**Resolution:**
+<pointer to the fix — either inline if small, or "see compounds/<slug>" if separate>
+
+If the conversation doesn't actually contain a real diagnostic journey,
+respond with exactly: FLUSH_OK
+"""
+
+
+async def run_flush(context: str, phase: str = "generic") -> str:
+    """Use Claude Agent SDK to extract important knowledge from conversation context.
+
+    The phase parameter selects which extraction prompt to use:
+    - 'compound' → COMPOUND_EXTRACTION_PROMPT (problem→solution receipt)
+    - 'debug'    → DEBUG_EXTRACTION_PROMPT (diagnostic trace)
+    - other      → GENERIC_FLUSH_PROMPT (existing daily-log behavior)
+    """
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ResultMessage,
+        TextBlock,
+        query,
+    )
+
+    if phase == "compound":
+        prompt_template = COMPOUND_EXTRACTION_PROMPT
+    elif phase == "debug":
+        prompt_template = DEBUG_EXTRACTION_PROMPT
+    else:
+        prompt_template = GENERIC_FLUSH_PROMPT
+
+    prompt = f"{prompt_template}\n\n## Conversation Context\n\n{context}"
 
     response = ""
 
@@ -133,6 +258,7 @@ respond with exactly: FLUSH_OK
                 pass
     except Exception as e:
         import traceback
+
         logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
         response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
@@ -160,6 +286,7 @@ def maybe_trigger_compilation() -> None:
             if today_log in ingested:
                 # Already compiled today - check if the log has changed since
                 from hashlib import sha256
+
                 log_path = DAILY_DIR / today_log
                 if log_path.exists():
                     current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
@@ -197,7 +324,9 @@ def main():
     context_file = Path(sys.argv[1])
     session_id = sys.argv[2]
 
-    logging.info("flush.py started for session %s, context: %s", session_id, context_file)
+    logging.info(
+        "flush.py started for session %s, context: %s", session_id, context_file
+    )
 
     if not context_file.exists():
         logging.error("Context file not found: %s", context_file)
@@ -220,12 +349,19 @@ def main():
         context_file.unlink(missing_ok=True)
         return
 
-    logging.info("Flushing session %s: %d chars", session_id, len(context))
+    # Detect CE phase from transcript markers; phase routes the daily-log
+    # entry to compounds/, debugging/, or stays generic. compile.py reads
+    # the phase tag and creates the appropriate article type.
+    phase = detect_ce_phase(context)
+    logging.info(
+        "Flushing session %s: %d chars, phase=%s", session_id, len(context), phase
+    )
 
-    # Run the LLM extraction
-    response = asyncio.run(run_flush(context))
+    # Run the LLM extraction with the phase-appropriate prompt
+    response = asyncio.run(run_flush(context, phase=phase))
 
-    # Append to daily log
+    # Append to daily log. Phase-tagged entries get a section header that
+    # tells compile.py to route to the right knowledge subdir.
     if "FLUSH_OK" in response:
         logging.info("Result: FLUSH_OK")
         append_to_daily_log(
@@ -235,8 +371,14 @@ def main():
         logging.error("Result: %s", response)
         append_to_daily_log(response, "Memory Flush")
     else:
-        logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        section_header = {
+            "compound": "Compound (problem→solution receipt)",
+            "debug": "Debug Trace (diagnostic journey)",
+        }.get(phase, "Session")
+        logging.info(
+            "Result: saved to daily log (%d chars, phase=%s)", len(response), phase
+        )
+        append_to_daily_log(response, section_header)
 
     # Update dedup state
     save_flush_state({"session_id": session_id, "timestamp": time.time()})

@@ -10,6 +10,8 @@ scripts/flush.log
 scripts/compile.log
 scripts/session-flush-*
 scripts/flush-context-*
+.answered-projects.txt
+.session-state/
 
 # Generated content (built up per-user by hooks and scripts)
 daily/
