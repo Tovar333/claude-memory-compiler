@@ -224,10 +224,22 @@ def build_context(cwd: Path, first_time: bool) -> str:
         )
         return "\n\n---\n\n".join(parts)
 
+    # Index dump policy: small indexes (<2000 chars) inline; larger indexes
+    # surface as a count + search-pointer to avoid duplicating MEMORY.md.
+    # Full text is searchable via mcp memory-kb / FTS5 when needed.
     if INDEX_FILE.exists():
-        parts.append(
-            f"## Knowledge Base Index\n\n{INDEX_FILE.read_text(encoding='utf-8')}"
-        )
+        idx_text = INDEX_FILE.read_text(encoding="utf-8")
+        if len(idx_text) <= 2000:
+            parts.append(f"## Knowledge Base Index\n\n{idx_text}")
+        else:
+            article_count = sum(
+                1 for ln in idx_text.splitlines() if ln.lstrip().startswith("| [[")
+            )
+            parts.append(
+                f"## Knowledge Base\n\n{article_count} articles indexed at "
+                f"`{INDEX_FILE}`. Query via mcp memory-kb FTS5 search when a "
+                f"specific topic is needed (do not always-load)."
+            )
     else:
         parts.append("## Knowledge Base Index\n\n(empty — no articles yet)")
 
