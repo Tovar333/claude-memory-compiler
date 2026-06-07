@@ -24,6 +24,26 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# On Windows the Agent SDK spawns the bundled claude.exe via anyio.open_process()
+# with no window flag. Because this background process has no console of its own
+# (the hook launches it with CREATE_NO_WINDOW), Windows would hand that child a
+# brand-new VISIBLE console window. Patch anyio so the child is spawned windowless
+# too. Covers both the main transport and the SDK's `claude -v` version check.
+if sys.platform == "win32":
+    import subprocess as _subprocess
+
+    import anyio as _anyio
+
+    _orig_open_process = _anyio.open_process
+
+    async def _no_window_open_process(*args, **kwargs):
+        kwargs["creationflags"] = (
+            kwargs.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
+        )
+        return await _orig_open_process(*args, **kwargs)
+
+    _anyio.open_process = _no_window_open_process
+
 ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
@@ -248,6 +268,11 @@ async def run_flush(context: str, phase: str = "generic") -> str:
                 cwd=str(ROOT),
                 allowed_tools=[],
                 max_turns=2,
+                # This is a cheap summarization job — pin Haiku so the background
+                # flush never inherits the interactive session's flagship model
+                # (e.g. ~/.claude/settings.json "model": "opus") and quietly drains
+                # the plan budget on every compact / session-end.
+                model="haiku",
             ),
         ):
             if isinstance(message, AssistantMessage):
