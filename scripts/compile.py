@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from config import AGENTS_FILE, CONCEPTS_DIR, CONNECTIONS_DIR, DAILY_DIR, KNOWLEDGE_DIR, now_iso
+from sdk_nowindow import apply as _silence_sdk_windows
 from utils import (
     file_hash,
     list_raw_files,
@@ -27,6 +28,10 @@ from utils import (
     read_wiki_index,
     save_state,
 )
+
+# This script is spawned DETACHED_PROCESS (no console) by flush.py's end-of-day
+# trigger, so the SDK's claude.exe would otherwise get a stray visible window.
+_silence_sdk_windows()
 
 # ── Paths for the LLM to use ──────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -137,6 +142,10 @@ Read the daily log above and compile it into wiki articles following the schema 
                 allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
                 permission_mode="acceptEdits",
                 max_turns=30,
+                # Pin Sonnet so this nightly background compile doesn't inherit
+                # the interactive session's flagship model (settings.json "opus")
+                # and quietly drain the plan budget over ~30 unattended turns.
+                model="sonnet",
             ),
         ):
             if isinstance(message, AssistantMessage):

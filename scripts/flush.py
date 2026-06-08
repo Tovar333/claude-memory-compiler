@@ -25,24 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # On Windows the Agent SDK spawns the bundled claude.exe via anyio.open_process()
-# with no window flag. Because this background process has no console of its own
-# (the hook launches it with CREATE_NO_WINDOW), Windows would hand that child a
-# brand-new VISIBLE console window. Patch anyio so the child is spawned windowless
-# too. Covers both the main transport and the SDK's `claude -v` version check.
-if sys.platform == "win32":
-    import subprocess as _subprocess
+# with no window flag, which would pop a stray visible "claude" console window.
+# Single source for the fix lives in sdk_nowindow.py -- apply it before any SDK call.
+from sdk_nowindow import apply as _silence_sdk_windows
 
-    import anyio as _anyio
-
-    _orig_open_process = _anyio.open_process
-
-    async def _no_window_open_process(*args, **kwargs):
-        kwargs["creationflags"] = (
-            kwargs.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
-        )
-        return await _orig_open_process(*args, **kwargs)
-
-    _anyio.open_process = _no_window_open_process
+_silence_sdk_windows()
 
 ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"

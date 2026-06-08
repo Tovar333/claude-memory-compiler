@@ -17,7 +17,11 @@ import asyncio
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, QA_DIR, now_iso
+from sdk_nowindow import apply as _silence_sdk_windows
 from utils import load_state, read_all_wiki_content, save_state
+
+# Keep the SDK's claude.exe windowless if this is ever run without a console.
+_silence_sdk_windows()
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -91,6 +95,8 @@ consulting the knowledge base below.
                 allowed_tools=tools,
                 permission_mode="acceptEdits",
                 max_turns=15,
+                # Pin Sonnet so this doesn't inherit settings.json "opus".
+                model="sonnet",
             ),
         ):
             if isinstance(message, AssistantMessage):

@@ -16,6 +16,7 @@ import asyncio
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
+from sdk_nowindow import apply as _silence_sdk_windows
 from utils import (
     count_inbound_links,
     extract_wikilinks,
@@ -28,6 +29,9 @@ from utils import (
     save_state,
     wiki_article_exists,
 )
+
+# Keep the SDK's claude.exe windowless if this is ever run without a console.
+_silence_sdk_windows()
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -187,6 +191,8 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
                 cwd=str(ROOT_DIR),
                 allowed_tools=[],
                 max_turns=2,
+                # Pin Sonnet so this doesn't inherit settings.json "opus".
+                model="sonnet",
             ),
         ):
             if isinstance(message, AssistantMessage):
