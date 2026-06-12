@@ -3,10 +3,11 @@ Windows: force the Claude Agent SDK's spawned claude.exe to run windowless.
 
 Every script here that calls ``claude_agent_sdk.query()`` spawns the bundled
 ``claude.exe`` via ``anyio.open_process()`` WITHOUT a creation flag. When the
-parent script has no console of its own -- e.g. it was launched
-``DETACHED_PROCESS`` (compile.py) or with ``CREATE_NO_WINDOW`` (flush.py) --
-Windows hands that console child a brand-new VISIBLE window. Hiding the parent
-is NOT enough; the SDK's own spawn deep inside must also pass the flag.
+parent script was launched ``DETACHED_PROCESS`` (truly console-less), Windows
+hands that console child a brand-new VISIBLE window. All spawn sites here now
+use ``CREATE_NO_WINDOW`` (hidden console, inherited by children) instead --
+2026-06-11 fix in flush.py's compile trigger -- but keep this patch as the
+belt-and-suspenders layer for manual or console-less launches.
 
 Single source: do NOT copy this monkeypatch inline into each script. Import and
 call ``apply()`` at module top, before any SDK call. This file is the one place

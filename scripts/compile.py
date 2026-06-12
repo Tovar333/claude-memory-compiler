@@ -29,18 +29,41 @@ from utils import (
     save_state,
 )
 
-# This script is spawned DETACHED_PROCESS (no console) by flush.py's end-of-day
-# trigger, so the SDK's claude.exe would otherwise get a stray visible window.
+# This script is spawned with a hidden console (CREATE_NO_WINDOW) by flush.py's
+# end-of-day trigger; keep the SDK patch anyway so a manual/console-less launch
+# can't give claude.exe a stray visible window.
 _silence_sdk_windows()
 
 # ── Paths for the LLM to use ──────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
+# ── Cost guards (2026-06-11, after $64 cumulative plan-usage burn) ────
+# Automatic runs compile at most N logs; a log that keeps erroring is
+# skipped after MAX_FAILURES so a usage-limit night can't retry-loop the
+# whole backlog every compact. --all / --file bypass both guards.
+MAX_FILES_PER_RUN = 3
+MAX_FAILURES_BEFORE_SKIP = 2
 
-async def compile_daily_log(log_path: Path, state: dict) -> float:
+
+def _schema_excerpt(agents_md: str) -> str:
+    """Slice AGENTS.md to the sections the compiler actually needs.
+
+    The full file (~24 KB) mostly documents architecture/hooks/scripts — dead
+    weight in every compile prompt. Keep Article Formats + Conventions; fall
+    back to the full file if the section markers ever change.
+    """
+    try:
+        formats = agents_md.split("## Article Formats")[1].split("## Core Operations")[0]
+        conventions = agents_md.split("## Conventions")[1].split("## Full Project Structure")[0]
+        return "## Article Formats" + formats + "## Conventions" + conventions
+    except IndexError:
+        return agents_md
+
+
+async def compile_daily_log(log_path: Path, state: dict) -> tuple[float, bool]:
     """Compile a single daily log into knowledge articles.
 
-    Returns the API cost of the compilation.
+    Returns (API cost, success flag).
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -51,21 +74,13 @@ async def compile_daily_log(log_path: Path, state: dict) -> float:
     )
 
     log_content = log_path.read_text(encoding="utf-8")
-    schema = AGENTS_FILE.read_text(encoding="utf-8")
+    schema = _schema_excerpt(AGENTS_FILE.read_text(encoding="utf-8"))
     wiki_index = read_wiki_index()
 
-    # Read existing articles for context
-    existing_articles_context = ""
-    existing = {}
-    for article_path in list_wiki_articles():
-        rel = article_path.relative_to(KNOWLEDGE_DIR)
-        existing[str(rel)] = article_path.read_text(encoding="utf-8")
-
-    if existing:
-        parts = []
-        for rel_path, content in existing.items():
-            parts.append(f"### {rel_path}\n```markdown\n{content}\n```")
-        existing_articles_context = "\n\n".join(parts)
+    # Cost guard: do NOT embed existing articles in the prompt. The agent has
+    # Read/Glob/Grep — the index below is its map, and it reads only the few
+    # articles it actually updates. Embedding the whole KB made every compile
+    # re-send ~all articles each turn (cost grew with the square of KB size).
 
     timestamp = now_iso()
 
@@ -82,7 +97,9 @@ and extract knowledge into structured wiki articles.
 
 ## Existing Wiki Articles
 
-{existing_articles_context if existing_articles_context else "(No existing articles yet)"}
+The index above is the complete map of existing articles. Article files live
+under {KNOWLEDGE_DIR}. **Read only the specific articles you intend to update
+or link to (typically 2-5) — never bulk-read the whole knowledge base.**
 
 ## Daily Log to Compile
 
@@ -105,7 +122,7 @@ Read the daily log above and compile it into wiki articles following the schema 
 3. **Create connection articles** in `knowledge/connections/` if this log reveals non-obvious
    relationships between 2+ existing concepts
 4. **Update existing articles** if this log adds new information to concepts already in the wiki
-   - Read the existing article, add the new information, add the source to frontmatter
+   - First Read that specific article file, then add the new information and the source to frontmatter
 5. **Update knowledge/index.md** - Add new entries to the table
    - Each entry: `| [[path/slug]] | One-line summary | source-file | {timestamp[:10]} |`
 6. **Append to knowledge/log.md** - Add a timestamped entry:
@@ -132,6 +149,7 @@ Read the daily log above and compile it into wiki articles following the schema 
 """
 
     cost = 0.0
+    ok = True
 
     try:
         async for message in query(
@@ -157,19 +175,23 @@ Read the daily log above and compile it into wiki articles following the schema 
                 print(f"  Cost: ${cost:.4f}")
     except Exception as e:
         print(f"  Error: {e}")
-        return 0.0
+        ok = False
 
-    # Update state
     rel_path = log_path.name
-    state.setdefault("ingested", {})[rel_path] = {
-        "hash": file_hash(log_path),
-        "compiled_at": now_iso(),
-        "cost_usd": cost,
-    }
+    if ok:
+        state.setdefault("ingested", {})[rel_path] = {
+            "hash": file_hash(log_path),
+            "compiled_at": now_iso(),
+            "cost_usd": cost,
+        }
+        state.setdefault("failures", {}).pop(rel_path, None)
+    else:
+        failures = state.setdefault("failures", {})
+        failures[rel_path] = failures.get(rel_path, 0) + 1
     state["total_cost"] = state.get("total_cost", 0.0) + cost
     save_state(state)
 
-    return cost
+    return cost, ok
 
 
 def main():
@@ -205,6 +227,27 @@ def main():
                 if not prev or prev.get("hash") != file_hash(log_path):
                     to_compile.append(log_path)
 
+            # Cost guards (automatic runs only; --all / --file bypass).
+            failures = state.get("failures", {})
+            skipped = [
+                p for p in to_compile
+                if failures.get(p.name, 0) >= MAX_FAILURES_BEFORE_SKIP
+            ]
+            if skipped:
+                names = ", ".join(p.name for p in skipped)
+                print(
+                    f"Skipping {len(skipped)} repeatedly-failing log(s) "
+                    f"(rerun with --all to force): {names}"
+                )
+                to_compile = [p for p in to_compile if p not in skipped]
+            if len(to_compile) > MAX_FILES_PER_RUN:
+                print(
+                    f"Cost guard: compiling {MAX_FILES_PER_RUN} of "
+                    f"{len(to_compile)} pending logs; the rest drain on "
+                    f"later runs."
+                )
+                to_compile = to_compile[:MAX_FILES_PER_RUN]
+
     if not to_compile:
         print("Nothing to compile - all daily logs are up to date.")
         return
@@ -218,14 +261,17 @@ def main():
 
     # Compile each file sequentially
     total_cost = 0.0
+    failed = 0
     for i, log_path in enumerate(to_compile, 1):
         print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
-        cost = asyncio.run(compile_daily_log(log_path, state))
+        cost, ok = asyncio.run(compile_daily_log(log_path, state))
         total_cost += cost
-        print(f"  Done.")
+        failed += 0 if ok else 1
+        print("  Done." if ok else "  FAILED (will retry next run, max 2 attempts).")
 
     articles = list_wiki_articles()
-    print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
+    status = f", {failed} failed" if failed else ""
+    print(f"\nCompilation complete ({len(to_compile)} file(s){status}). Total cost: ${total_cost:.2f}")
     print(f"Knowledge base: {len(articles)} articles")
 
 

@@ -317,7 +317,11 @@ def maybe_trigger_compilation() -> None:
 
     kwargs: dict = {}
     if sys.platform == "win32":
-        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
+        # CREATE_NO_WINDOW, NOT DETACHED_PROCESS: a detached parent has no
+        # console, so its console-app children (uv -> python.exe) each get a
+        # brand-new VISIBLE window. A hidden console is inherited down the
+        # whole chain instead (popup seen 2026-06-11 on the post-18:00 compile).
+        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
 

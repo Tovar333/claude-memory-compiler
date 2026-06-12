@@ -499,8 +499,8 @@ Commands use simple relative paths from the project root. Empty `matcher` catche
 
 ### Background Flush Process (`flush.py`)
 
-Spawned by both hooks as a fully detached background process:
-- **Windows:** `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` flags
+Spawned by both hooks as a hidden background process:
+- **Windows:** `CREATE_NO_WINDOW` (NOT `DETACHED_PROCESS` — a detached parent's console-app children each pop a new visible window; a hidden console is inherited down the chain. Same flag on flush.py's end-of-day compile spawn, fixed 2026-06-11.)
 - **Mac/Linux:** `start_new_session=True`
 
 This ensures flush.py survives after Claude Code's hook process exits.
