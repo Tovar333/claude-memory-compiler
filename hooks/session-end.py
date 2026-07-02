@@ -5,6 +5,11 @@ When a Claude Code session ends, this hook reads the transcript path from
 stdin, extracts conversation context, and spawns flush.py as a background
 process to extract knowledge into the daily log.
 
+Shared-KB capture is OPT-IN per project (gating.py, same state as injection,
+default OFF) — the gate sits before any transcript excerpt is extracted, so
+non-opted projects never leave content in scripts/ or daily/. The per-project
+FTS5 reindex always runs regardless of opt-in.
+
 The hook itself does NO API calls - only local file I/O for speed (<10s).
 """
 
@@ -91,25 +96,9 @@ def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
     return context, len(recent)
 
 
-def main() -> None:
-    # Read hook input from stdin
-    # Claude Code on Windows may pass paths with unescaped backslashes
-    try:
-        raw_input = sys.stdin.read()
-        try:
-            hook_input: dict = json.loads(raw_input)
-        except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            hook_input = json.loads(fixed_input)
-    except (json.JSONDecodeError, ValueError, EOFError) as e:
-        logging.error("Failed to parse stdin: %s", e)
-        return
-
-    session_id = hook_input.get("session_id", "unknown")
-    source = hook_input.get("source", "unknown")
+def run_kb_capture(hook_input: dict, session_id: str) -> None:
+    """Extract the transcript excerpt and spawn flush.py. Opt-in callers only."""
     transcript_path_str = hook_input.get("transcript_path", "")
-
-    logging.info("SessionEnd fired: session=%s source=%s", session_id, source)
 
     if not transcript_path_str or not isinstance(transcript_path_str, str):
         logging.info("SKIP: no transcript path")
@@ -174,13 +163,50 @@ def main() -> None:
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
 
+
+def main() -> None:
+    # Read hook input from stdin
+    # Claude Code on Windows may pass paths with unescaped backslashes
+    try:
+        raw_input = sys.stdin.read()
+        try:
+            hook_input: dict = json.loads(raw_input)
+        except json.JSONDecodeError:
+            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
+            hook_input = json.loads(fixed_input)
+    except (json.JSONDecodeError, ValueError, EOFError) as e:
+        logging.error("Failed to parse stdin: %s", e)
+        return
+
+    session_id = hook_input.get("session_id", "unknown")
+    source = hook_input.get("source", "unknown")
+
+    logging.info("SessionEnd fired: session=%s source=%s", session_id, source)
+
+    cwd = Path(hook_input.get("cwd") or os.getcwd()).resolve()
+
+    # Shared-KB capture gate (gating.py = single source, shared with injection).
+    # Fails CLOSED: any gate error means no capture.
+    capture = False
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from gating import is_opted_in
+
+        capture, gate_reason = is_opted_in(cwd, allow_prompt=False)
+        logging.info("Capture gate: %s (%s) cwd=%s", capture, gate_reason, cwd)
+    except Exception as e:
+        logging.error("Capture gate error (failing CLOSED, no capture): %s", e)
+
+    if capture:
+        run_kb_capture(hook_input, session_id)
+
     # FTS5 index of per-project auto-memory dir (fast, stdlib-only, in-process).
-    # Failure here must never block the existing flush.py path.
+    # Always runs — per-project service, independent of KB opt-in.
+    # Failure here must never block anything else.
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from memory_fts_index import memory_dir_for_cwd, reindex
 
-        cwd = Path(hook_input.get("cwd") or os.getcwd()).resolve()
         md = memory_dir_for_cwd(cwd)
         if md.is_dir():
             result = reindex(md)

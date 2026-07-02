@@ -5,15 +5,9 @@ explicitly opted in. This keeps non-bot projects (scratch dirs, one-off
 tasks) free of irrelevant context bloat — saves ~5,800 tokens per session
 on opted-out projects.
 
-Decision tree (first match wins):
-  1. MEMORY_KB_SKIP=1 env var          → skip (one-shot disable)
-  2. MEMORY_KB_FORCE=1 env var         → inject (one-shot enable)
-  3. .claude/memory-kb.disabled in cwd → skip
-  4. .claude/memory-kb.enabled in cwd  → inject
-  5. Walk ancestor dirs for .enabled   → inject if found
-  6. Cwd in global allow-list          → inject
-  7. First-time auto-prompt            → ask user, write answer to marker
-  8. Default                           → skip (silent fast exit)
+Decision tree: see gating.py — the SINGLE SOURCE of the opt-in tree, shared
+with the capture hooks (session-end.py / pre-compact.py) so one marker
+controls the whole subsystem.
 
 When injecting, the context includes:
   - Today's date
@@ -32,14 +26,14 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from gating import is_opted_in, mark_project_answered
+
 # Paths relative to memory-kb project root
 ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE_DIR = ROOT / "knowledge"
 DAILY_DIR = ROOT / "daily"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
 COMPOUNDS_DIR = KNOWLEDGE_DIR / "compounds"
-ALLOW_LIST = ROOT / ".enabled-paths.txt"
-ANSWERED_LIST = ROOT / ".answered-projects.txt"
 
 MAX_CONTEXT_CHARS = 20_000
 MAX_LOG_LINES = 30
@@ -62,73 +56,6 @@ def parse_cwd(hook_input: dict) -> Path:
     """Extract cwd from hook input. Falls back to actual cwd if not provided."""
     cwd_str = hook_input.get("cwd") or os.getcwd()
     return Path(cwd_str).resolve()
-
-
-def is_opted_in(cwd: Path) -> tuple[bool, str]:
-    """Apply the 8-layer decision tree. Returns (should_inject, reason)."""
-    # 1. Env var: skip
-    if os.environ.get("MEMORY_KB_SKIP"):
-        return False, "MEMORY_KB_SKIP env var set"
-    # 2. Env var: force inject
-    if os.environ.get("MEMORY_KB_FORCE"):
-        return True, "MEMORY_KB_FORCE env var set"
-    # 3. Explicit opt-out marker in cwd
-    if (cwd / ".claude" / "memory-kb.disabled").exists():
-        return False, "explicit .claude/memory-kb.disabled in cwd"
-    # 4. Explicit opt-in marker in cwd
-    if (cwd / ".claude" / "memory-kb.enabled").exists():
-        return True, "explicit .claude/memory-kb.enabled in cwd"
-    # 5. Ancestor walk
-    for parent in cwd.parents:
-        if (parent / ".claude" / "memory-kb.enabled").exists():
-            return True, f"inherited from ancestor {parent}"
-        if (parent / ".claude" / "memory-kb.disabled").exists():
-            return False, f"explicit disable in ancestor {parent}"
-        # Stop at filesystem root or home
-        if parent == Path.home() or parent == parent.parent:
-            break
-    # 6. Global allow-list
-    if ALLOW_LIST.exists():
-        for line in ALLOW_LIST.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            try:
-                if str(cwd).startswith(str(Path(line).resolve())):
-                    return True, f"matched global allow-list entry {line}"
-            except Exception:
-                continue
-    # 7. First-time auto-prompt
-    if not project_already_answered(cwd):
-        # Returning False but caller checks separately whether to inject the prompt-text;
-        # we set is_prompt_first_time = True via a side-channel marker file write here
-        # (see main() — handles this by inserting a one-shot prompt into context).
-        return False, "first-time prompt"
-    # 8. Default
-    return False, "default skip"
-
-
-def project_already_answered(cwd: Path) -> bool:
-    """Check whether we've already shown the first-time prompt for this project."""
-    if not ANSWERED_LIST.exists():
-        return False
-    try:
-        for line in ANSWERED_LIST.read_text(encoding="utf-8").splitlines():
-            if line.strip() == str(cwd):
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def mark_project_answered(cwd: Path) -> None:
-    """Append cwd to the answered list so the prompt never re-fires."""
-    try:
-        ANSWERED_LIST.parent.mkdir(parents=True, exist_ok=True)
-        with ANSWERED_LIST.open("a", encoding="utf-8") as f:
-            f.write(str(cwd) + "\n")
-    except Exception:
-        pass
 
 
 def get_recent_log() -> str:

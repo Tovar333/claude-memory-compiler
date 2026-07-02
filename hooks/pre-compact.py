@@ -6,6 +6,11 @@ discards detail). This hook fires BEFORE that happens, extracting conversation
 context and spawning flush.py to extract knowledge that would otherwise
 be lost to summarization.
 
+Shared-KB capture is OPT-IN per project (gating.py, same state as injection,
+default OFF) — the gate sits before any transcript excerpt is extracted, so
+non-opted projects never leave content in scripts/ or daily/. The per-project
+resume snapshot always runs regardless of opt-in.
+
 The hook itself does NO API calls - only local file I/O for speed (<10s).
 """
 
@@ -90,23 +95,9 @@ def extract_conversation_context(transcript_path: Path) -> tuple[str, int]:
     return context, len(recent)
 
 
-def main() -> None:
-    # Read hook input from stdin
-    try:
-        raw_input = sys.stdin.read()
-        try:
-            hook_input: dict = json.loads(raw_input)
-        except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
-            hook_input = json.loads(fixed_input)
-    except (json.JSONDecodeError, ValueError, EOFError) as e:
-        logging.error("Failed to parse stdin: %s", e)
-        return
-
-    session_id = hook_input.get("session_id", "unknown")
+def run_kb_capture(hook_input: dict, session_id: str) -> None:
+    """Extract the transcript excerpt and spawn flush.py. Opt-in callers only."""
     transcript_path_str = hook_input.get("transcript_path", "")
-
-    logging.info("PreCompact fired: session=%s", session_id)
 
     # transcript_path can be empty (known Claude Code bug #13668)
     if not transcript_path_str or not isinstance(transcript_path_str, str):
@@ -170,8 +161,44 @@ def main() -> None:
     except Exception as e:
         logging.error("Failed to spawn flush.py: %s", e)
 
+
+def main() -> None:
+    # Read hook input from stdin
+    try:
+        raw_input = sys.stdin.read()
+        try:
+            hook_input: dict = json.loads(raw_input)
+        except json.JSONDecodeError:
+            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r"\\\\", raw_input)
+            hook_input = json.loads(fixed_input)
+    except (json.JSONDecodeError, ValueError, EOFError) as e:
+        logging.error("Failed to parse stdin: %s", e)
+        return
+
+    session_id = hook_input.get("session_id", "unknown")
+
+    logging.info("PreCompact fired: session=%s", session_id)
+
+    cwd = Path(hook_input.get("cwd") or os.getcwd()).resolve()
+
+    # Shared-KB capture gate (gating.py = single source, shared with injection).
+    # Fails CLOSED: any gate error means no capture.
+    capture = False
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from gating import is_opted_in
+
+        capture, gate_reason = is_opted_in(cwd, allow_prompt=False)
+        logging.info("Capture gate: %s (%s) cwd=%s", capture, gate_reason, cwd)
+    except Exception as e:
+        logging.error("Capture gate error (failing CLOSED, no capture): %s", e)
+
+    if capture:
+        run_kb_capture(hook_input, session_id)
+
     # Structured resume snapshot for the per-project auto-memory dir.
-    # Failure here must never block the existing flush.py path.
+    # Always runs — per-project service, independent of KB opt-in.
+    # Failure here must never block anything else.
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from resume_snapshot import write_snapshot
